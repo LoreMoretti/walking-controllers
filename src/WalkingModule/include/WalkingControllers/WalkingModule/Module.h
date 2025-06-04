@@ -92,6 +92,13 @@ public:
             std::cerr << "AdmittanceController: Missing parameter 'kp_gains'." << std::endl;
             return false;
         }
+
+            if (!paramHandlerPtr->getParameter("ki_gains", kIGains_))
+            {
+                std::cerr << "AdmittanceController: Missing parameter 'ki_gains'." << std::endl;
+                return false;
+            }
+
         if (!paramHandlerPtr->getParameter("kp_gains_sim", kpGainsSim_))
         {
             std::cerr << "AdmittanceController: Missing parameter 'kp_gains_sim'." << std::endl;
@@ -112,6 +119,13 @@ public:
             std::cerr << "AdmittanceController: Missing parameter 'max_torque'." << std::endl;
             return false;
         }
+
+            if (!paramHandlerPtr->getParameter("dT", dT))
+            {
+                std::cerr << "AdmittanceController: Missing parameter 'dT'." << std::endl;
+                return false;
+            }
+
         if (kpGains_.size() != kpGainsSim_.size() ||
             kpGains_.size() != gearRatio_.size() ||
             kpGains_.size() != kTau_.size() ||
@@ -121,7 +135,7 @@ public:
             return false;
         }
  
-        if ( (kpGainsSim_.array() == 0.0).any() )
+            if ((kpGainsSim_.array() == 0.0).any())
         {
             std::cerr << "AdmittanceController: kp_gains_sim cannot contain zero values." << std::endl;
             return false;
@@ -133,6 +147,7 @@ public:
         jointsPos_.setZero(sz);
         jointsTq_.setZero(sz);
         motorCurrent_.setZero(sz);
+            errorIntegral_.setZero(sz);
  
         isInitialized_ = true;
         return true;
@@ -142,7 +157,7 @@ public:
     bool setInput(const Eigen::Ref<const Eigen::VectorXd> jointsPosition,
                   const Eigen::Ref<const Eigen::VectorXd> jointsDesiredPosition)
     {
-        if(!checkInitialized())
+            if (!checkInitialized())
         {
             std::cerr << "AdmittanceController: Not initialized." << std::endl;
             return false;
@@ -159,7 +174,7 @@ public:
             return false;
         }
         
-        jointsPos_        = jointsPosition;
+            jointsPos_ = jointsPosition;
         jointsDesiredPos_ = jointsDesiredPosition;
         return true;
     }
@@ -167,32 +182,41 @@ public:
     /** Compute the “desired position tilde” (see original comment). */
     Eigen::VectorXd getDesiredPositionTilde() const
     {
-        Eigen::ArrayXd gamma = kpGains_.array() / kpGainsSim_.array();
-        return ( gamma * (jointsDesiredPos_.array() - jointsPos_.array())
-               +            jointsPos_.array() ).matrix();
+            const Eigen::ArrayXd gamma = kpGains_.array() / kpGainsSim_.array();
+            return (gamma * (jointsDesiredPos_.array() - jointsPos_.array()) + jointsPos_.array()).matrix()
+             + (gamma * (kIGains_.array() / kpGains_.array()) * errorIntegral_.array()).matrix();
     }
  
     /** Run one control cycle: torque & motor-current update. */
     bool advance()
     {
-        if(!checkInitialized())
+            if (!checkInitialized())
         {
             std::cerr << "AdmittanceController: Not initialized." << std::endl;
             return false;
         } 
-        jointsTq_ = ( kpGainsSim_.array()
-                    * ( getDesiredPositionTilde().array() - jointsPos_.array() ) ).matrix();
+
+            errorIntegral_ += (jointsDesiredPos_ - jointsPos_) * std::chrono::duration<double>(dT).count();
+            jointsTq_ = (kpGainsSim_.array() * (getDesiredPositionTilde().array() - jointsPos_.array())).matrix();
  
         // torque saturation
-        jointsTq_ = jointsTq_.cwiseMin( jointTqLimits_.cwiseAbs() )
-                               .cwiseMax( -jointTqLimits_.cwiseAbs() );
+            jointsTq_ = jointsTq_.cwiseMin(jointTqLimits_.cwiseAbs())
+                            .cwiseMax(-jointTqLimits_.cwiseAbs());
  
-        motorCurrent_ = jointsTq_.array() / ( gearRatio_.array() * kTau_.array() );
+            motorCurrent_ = jointsTq_.array() / (gearRatio_.array() * kTau_.array());
         return true;
     }
  
-    Eigen::VectorXd getMotorCurrent() const { checkInitialized(); return motorCurrent_; }
-    Eigen::VectorXd getJointTorque()  const { checkInitialized(); return jointsTq_;     }
+        Eigen::VectorXd getMotorCurrent() const
+        {
+            checkInitialized();
+            return motorCurrent_;
+        }
+        Eigen::VectorXd getJointTorque() const
+        {
+            checkInitialized();
+            return jointsTq_;
+        }
  
 private:
     bool checkInitialized() const
@@ -205,13 +229,16 @@ private:
     }
  
     // ---- parameters & limits --------------------------------------------------
-    Eigen::VectorXd kpGains_, kpGainsSim_;
+        Eigen::VectorXd kpGains_, kpGainsSim_, kIGains_;
     Eigen::VectorXd gearRatio_, kTau_;
     Eigen::VectorXd jointTqLimits_;
+        Eigen::VectorXd errorIntegral_; /**< Error integral for the admittance controller. */
+
+        std::chrono::nanoseconds dT; /**< Time step for the controller. */
  
     // ---- runtime state --------------------------------------------------------
     Eigen::VectorXd jointsDesiredPos_, jointsPos_;
-    Eigen::VectorXd jointsTq_,        motorCurrent_;
+        Eigen::VectorXd jointsTq_, motorCurrent_;
  
     bool isInitialized_{false};
 };
