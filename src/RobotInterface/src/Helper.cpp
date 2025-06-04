@@ -333,6 +333,12 @@ bool RobotInterface::configureRobot(const yarp::os::Searchable& config)
         return false;
     }
 
+    if(!m_robotDevice.view(m_currentInterface) || !m_currentInterface)
+    {
+        yError() << "[configureRobot] Cannot obtain ICurrentControl interface";
+        return false;
+    }
+
     if(!m_robotDevice.view(m_velocityInterface) || !m_velocityInterface)
     {
         yError() << "[configureRobot] Cannot obtain IVelocityInterface interface";
@@ -1045,6 +1051,40 @@ bool RobotInterface::setDirectPositionReferences(const iDynTree::VectorDynSize& 
     if(!m_positionDirectInterface->setPositions(m_desiredJointValueDeg.data()))
     {
         yError() << "[RobotInterface::setDirectPositionReferences] Error while setting the desired position.";
+        return false;
+    }
+
+    return true;
+}
+
+bool RobotInterface::setCurrentReferences(const iDynTree::VectorDynSize& desiredCurrentA)
+{
+    if(m_currentInterface == nullptr)
+    {
+        yError() << "[RobotInterface::setCurrentReferences] Current I/F not ready.";
+        return false;
+    }
+
+    if(m_controlMode != VOCAB_CM_CURRENT)
+    {
+        if(!switchToControlMode(VOCAB_CM_CURRENT))
+        {
+            yError() << "[RobotInterface::setCurrentReferences] Unable to switch in current control mode.";
+            return false;
+        }
+        m_controlMode = VOCAB_CM_CURRENT;
+    }
+
+    if(desiredCurrentA.size() != m_actuatedDOFs)
+    {
+        yError() << "[RobotInterface::setCurrentReferences] Dimension mismatch between desired current "
+                 << "vector and the number of controlled joints.";
+        return false;
+    }
+
+    if(!m_currentInterface->setRefCurrents(desiredCurrentA.data()))
+    {
+        yError() << "[RobotInterface::setCurrentReferences] Error while setting the desired current.";
         return false;
     }
 

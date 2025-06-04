@@ -19,6 +19,7 @@
 
 
 #include <BipedalLocomotion/YarpUtilities/VectorsCollectionServer.h>
+#include <BipedalLocomotion/ParametersHandler/IParametersHandler.h>
 #include <BipedalLocomotion/Contacts/GlobalCoPEvaluator.h>
 #include <BipedalLocomotion/System/TimeProfiler.h>
 
@@ -54,6 +55,167 @@
 namespace WalkingControllers
 {
 
+
+// AdmittanceController.hpp 
+#include <Eigen/Dense>
+#include <vector>
+#include <stdexcept>
+#include <algorithm>
+ 
+/**
+* @brief 1-to-1 C++ rewrite of the Python AdmittanceController.
+*
+* – Uses Eigen::VectorXd for all numeric arrays.  
+* – Assumes a BLF interface:
+*       blf::parametersHandler::IParametersHandler
+*     exposing
+*       std::vector<double> getParameterVectorFloat(const std::string& name) const;
+* – Function names are camelCase.
+*/
+class AdmittanceController
+{
+public:
+    AdmittanceController() = default;
+ 
+    /** Read gains and limits from the parameter handler. */
+    bool initialize(std::weak_ptr<BipedalLocomotion::ParametersHandler::IParametersHandler> paramHandler)
+    {
+        // ---- fetch parameters -------------------------------------------------
+        auto paramHandlerPtr = paramHandler.lock();
+        if (!paramHandlerPtr)
+        {
+            std::cerr << "AdmittanceController: Parameter handler is not initialized." << std::endl;
+            return false;
+        }
+        if (!paramHandlerPtr->getParameter("kp_gains", kpGains_))
+        {
+            std::cerr << "AdmittanceController: Missing parameter 'kp_gains'." << std::endl;
+            return false;
+        }
+        if (!paramHandlerPtr->getParameter("kp_gains_sim", kpGainsSim_))
+        {
+            std::cerr << "AdmittanceController: Missing parameter 'kp_gains_sim'." << std::endl;
+            return false;
+        }
+        if (!paramHandlerPtr->getParameter("gear_ratio", gearRatio_))
+        {
+            std::cerr << "AdmittanceController: Missing parameter 'gear_ratio'." << std::endl;
+            return false;
+        }
+        if (!paramHandlerPtr->getParameter("ktau", kTau_))
+        {
+            std::cerr << "AdmittanceController: Missing parameter 'ktau'." << std::endl;
+            return false;
+        }
+        if (!paramHandlerPtr->getParameter("max_torque", jointTqLimits_))
+        {
+            std::cerr << "AdmittanceController: Missing parameter 'max_torque'." << std::endl;
+            return false;
+        }
+        if (kpGains_.size() != kpGainsSim_.size() ||
+            kpGains_.size() != gearRatio_.size() ||
+            kpGains_.size() != kTau_.size() ||
+            kpGains_.size() != jointTqLimits_.size())
+        {
+            std::cerr << "AdmittanceController: Parameter vectors must have the same size." << std::endl;
+            return false;
+        }
+ 
+        if ( (kpGainsSim_.array() == 0.0).any() )
+        {
+            std::cerr << "AdmittanceController: kp_gains_sim cannot contain zero values." << std::endl;
+            return false;
+        }
+ 
+        // ---- pre-allocate state vectors ---------------------------------------
+        size_t sz = kpGains_.size();
+        jointsDesiredPos_.setZero(sz);
+        jointsPos_.setZero(sz);
+        jointsTq_.setZero(sz);
+        motorCurrent_.setZero(sz);
+ 
+        isInitialized_ = true;
+        return true;
+    }
+ 
+    /** Provide current & desired joint positions (same length as gains). */
+    bool setInput(const Eigen::Ref<const Eigen::VectorXd> jointsPosition,
+                  const Eigen::Ref<const Eigen::VectorXd> jointsDesiredPosition)
+    {
+        if(!checkInitialized())
+        {
+            std::cerr << "AdmittanceController: Not initialized." << std::endl;
+            return false;
+        }
+ 
+        if (jointsPosition.size() != jointsDesiredPosition.size())
+        {
+            std::cerr << "AdmittanceController: Input arrays must have the same size." << std::endl;
+            return false;
+        }
+        if (jointsPosition.size() != kpGains_.size())
+        {
+            std::cerr << "AdmittanceController: Input arrays size must match gains size." << std::endl;
+            return false;
+        }
+        
+        jointsPos_        = jointsPosition;
+        jointsDesiredPos_ = jointsDesiredPosition;
+        return true;
+    }
+ 
+    /** Compute the “desired position tilde” (see original comment). */
+    Eigen::VectorXd getDesiredPositionTilde() const
+    {
+        Eigen::ArrayXd gamma = kpGains_.array() / kpGainsSim_.array();
+        return ( gamma * (jointsDesiredPos_.array() - jointsPos_.array())
+               +            jointsPos_.array() ).matrix();
+    }
+ 
+    /** Run one control cycle: torque & motor-current update. */
+    bool advance()
+    {
+        if(!checkInitialized())
+        {
+            std::cerr << "AdmittanceController: Not initialized." << std::endl;
+            return false;
+        } 
+        jointsTq_ = ( kpGainsSim_.array()
+                    * ( getDesiredPositionTilde().array() - jointsPos_.array() ) ).matrix();
+ 
+        // torque saturation
+        jointsTq_ = jointsTq_.cwiseMin( jointTqLimits_.cwiseAbs() )
+                               .cwiseMax( -jointTqLimits_.cwiseAbs() );
+ 
+        motorCurrent_ = jointsTq_.array() / ( gearRatio_.array() * kTau_.array() );
+        return true;
+    }
+ 
+    Eigen::VectorXd getMotorCurrent() const { checkInitialized(); return motorCurrent_; }
+    Eigen::VectorXd getJointTorque()  const { checkInitialized(); return jointsTq_;     }
+ 
+private:
+    bool checkInitialized() const
+    {
+        if (!isInitialized_)
+        {
+            return false;
+        }
+        return true;
+    }
+ 
+    // ---- parameters & limits --------------------------------------------------
+    Eigen::VectorXd kpGains_, kpGainsSim_;
+    Eigen::VectorXd gearRatio_, kTau_;
+    Eigen::VectorXd jointTqLimits_;
+ 
+    // ---- runtime state --------------------------------------------------------
+    Eigen::VectorXd jointsDesiredPos_, jointsPos_;
+    Eigen::VectorXd jointsTq_,        motorCurrent_;
+ 
+    bool isInitialized_{false};
+};
+ 
 /**
  * RFModule of the Walking controller
  */
@@ -151,6 +313,8 @@ namespace WalkingControllers
         std::unique_ptr<iCub::ctrl::Integrator> m_velocityIntegral{nullptr};
 
         BipedalLocomotion::YarpUtilities::VectorsCollectionServer m_vectorsCollectionServer; /**< Logger server. */
+
+        AdmittanceController m_admittanceController; /**< Admittance controller. */
 
         /**
          * Get the robot model from the resource finder and set it.

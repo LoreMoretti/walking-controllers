@@ -199,6 +199,13 @@ bool WalkingModule::configure(yarp::os::ResourceFinder &rf)
         return false;
     }
 
+    yarp::os::Bottle &admittanceControlOptions = rf.findGroup("ADMITTANCE_CONTROL");
+    if (!m_admittanceController.initialize(std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>(admittanceControlOptions)))
+    {
+        yError() << "[WalkingModule::configure] Unable to configure the global CoP Evaluator.";
+        return false;
+    }
+
     if (!setRobotModel(rf))
     {
         yError() << "[configure] Unable to set the robot model.";
@@ -432,10 +439,14 @@ bool WalkingModule::configure(yarp::os::ResourceFinder &rf)
         // Joint
         m_vectorsCollectionServer.populateMetadata("joints_state::positions::measured", m_robotControlHelper->getAxesList());
         m_vectorsCollectionServer.populateMetadata("joints_state::positions::desired", m_robotControlHelper->getAxesList());
+        m_vectorsCollectionServer.populateMetadata("joints_state::positions::tilde", m_robotControlHelper->getAxesList());
         m_vectorsCollectionServer.populateMetadata("joints_state::positions::retargeting", m_robotControlHelper->getAxesList());
         m_vectorsCollectionServer.populateMetadata("joints_state::positions::retargeting_raw", m_robotControlHelper->getAxesList());
         m_vectorsCollectionServer.populateMetadata("joints_state::velocities::measured", m_robotControlHelper->getAxesList());
         m_vectorsCollectionServer.populateMetadata("joints_state::velocities::retargeting", m_robotControlHelper->getAxesList());
+
+        // Motor state
+        m_vectorsCollectionServer.populateMetadata("motor_state::current::desired", m_robotControlHelper->getAxesList());
 
         // root link information
         m_vectorsCollectionServer.populateMetadata("root_link::position::measured", {"x", "y", "z"});
@@ -1017,7 +1028,28 @@ bool WalkingModule::updateModule()
             }
         }
 
-        if (!m_robotControlHelper->setDirectPositionReferences(m_qDesired))
+        iDynTree::VectorDynSize desiredPositionTilde;
+        desiredPositionTilde.resize(m_robotControlHelper->getActuatedDoFs());
+        iDynTree::toEigen(desiredPositionTilde) = m_admittanceController.getDesiredPositionTilde();
+
+        if(!m_admittanceController.setInput(iDynTree::toEigen(m_robotControlHelper->getJointPosition()),
+                                        iDynTree::toEigen(m_qDesired)))
+                                        {
+            yError() << "[WalkingModule::updateModule] Unable to set the input to the admittance controller.";
+            return false;
+                                        }
+
+        if(!m_admittanceController.advance())
+        {
+            yError() << "[WalkingModule::updateModule] Unable to advance the admittance controller.";
+            return false;
+        }
+
+        iDynTree::VectorDynSize desiredCurrent;
+        desiredCurrent.resize(m_robotControlHelper->getActuatedDoFs());
+        iDynTree::toEigen(desiredCurrent) = m_admittanceController.getMotorCurrent();
+
+        if (!m_robotControlHelper->setCurrentReferences(desiredCurrent))
         {
             yError() << "[WalkingModule::updateModule] Error while setting the reference position to iCub.";
             return false;
@@ -1122,10 +1154,14 @@ bool WalkingModule::updateModule()
             // Joint
             m_vectorsCollectionServer.populateData("joints_state::positions::measured", m_robotControlHelper->getJointPosition());
             m_vectorsCollectionServer.populateData("joints_state::positions::desired", m_qDesired);
+            m_vectorsCollectionServer.populateData("joints_state::positions::tilde", desiredPositionTilde);
             m_vectorsCollectionServer.populateData("joints_state::positions::retargeting", m_retargetingClient->jointPositions());
             m_vectorsCollectionServer.populateData("joints_state::positions::retargeting_raw", m_retargetingClient->rawJointPositions());
             m_vectorsCollectionServer.populateData("joints_state::velocities::measured", m_robotControlHelper->getJointVelocity());
             m_vectorsCollectionServer.populateData("joints_state::velocities::retargeting", m_retargetingClient->jointVelocities());
+            
+            // Motor
+            m_vectorsCollectionServer.populateData("motor_state::current::desired", desiredCurrent);
 
             // root link information
             m_vectorsCollectionServer.populateData("root_link::position::measured", m_FKSolver->getRootLinkToWorldTransform().getPosition());
@@ -1636,5 +1672,14 @@ bool WalkingModule::stopWalking()
     reset();
 
     m_robotState = WalkingFSM::Stopped;
+
+    // close the connection with robot
+    if (!m_robotControlHelper->close())
+    {
+        yError() << "[WalkingModule::close] Unable to close the connection with the robot.";
+        return false;
+    }
+
+    
     return true;
 }

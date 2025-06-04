@@ -14,6 +14,8 @@
 #include <yarp/dev/IControlLimits.h>
 #include <yarp/dev/IPositionControl.h>
 #include <yarp/dev/IPositionDirect.h>
+
+#include <yarp/dev/ICurrentControl.h>
 #include <yarp/dev/IVelocityControl.h>
 #include <yarp/dev/IInteractionMode.h>
 #include <yarp/sig/Vector.h>
@@ -44,6 +46,8 @@ namespace WalkingControllers
         yarp::dev::IEncodersTimed *m_encodersInterface{nullptr}; /**< Encorders interface. */
         yarp::dev::IPositionDirect *m_positionDirectInterface{nullptr}; /**< Direct position control interface. */
         yarp::dev::IPositionControl *m_positionInterface{nullptr}; /**< Position control interface. */
+        yarp::dev::ICurrentControl *m_currentInterface{nullptr}; /**< Current control interface. */
+
         yarp::dev::IVelocityControl *m_velocityInterface{nullptr}; /**< Position control interface. */
         yarp::dev::IControlMode *m_controlModeInterface{nullptr}; /**< Control mode interface. */
         yarp::dev::IControlLimits *m_limitsInterface{nullptr}; /**< Encorders interface. */
@@ -172,6 +176,14 @@ namespace WalkingControllers
          * @return true in case of success and false otherwise.
          */
         bool setDirectPositionReferences(const iDynTree::VectorDynSize&  desiredPositionsRad);
+
+        /**
+         * Set the desired current reference.
+         * (The current will be sent using DirectCurrentControl mode)
+         * @param desiredCurrentA desired joints current;
+         * @return true in case of success and false otherwise.
+         */
+        bool setCurrentReferences(const iDynTree::VectorDynSize& desiredCurrentA);
 
         /**
          * Set the desired velocity reference.
