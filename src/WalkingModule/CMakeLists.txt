@@ -24,6 +24,7 @@ add_walking_controllers_application(
                  BipedalLocomotion::Contacts
                  BipedalLocomotion::ManifConversions
                  BipedalLocomotion::System
+                 BipedalLocomotion::JointLevelControllers
                  ctrlLib
   SUBDIRECTORIES app)
 

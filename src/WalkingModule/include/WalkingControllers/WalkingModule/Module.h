@@ -22,6 +22,7 @@
 #include <BipedalLocomotion/ParametersHandler/IParametersHandler.h>
 #include <BipedalLocomotion/Contacts/GlobalCoPEvaluator.h>
 #include <BipedalLocomotion/System/TimeProfiler.h>
+#include <BipedalLocomotion/JointLevelControllers/PositionToCurrentController.h>
 
 
 // iDynTree
@@ -55,194 +56,51 @@
 namespace WalkingControllers
 {
 
-
-// AdmittanceController.hpp 
 #include <Eigen/Dense>
 #include <vector>
-#include <stdexcept>
-#include <algorithm>
  
-/**
-* @brief 1-to-1 C++ rewrite of the Python AdmittanceController.
-*
-* – Uses Eigen::VectorXd for all numeric arrays.  
-* – Assumes a BLF interface:
-*       blf::parametersHandler::IParametersHandler
-*     exposing
-*       std::vector<double> getParameterVectorFloat(const std::string& name) const;
-* – Function names are camelCase.
-*/
-class AdmittanceController
-{
-public:
-    AdmittanceController() = default;
- 
-    /** Read gains and limits from the parameter handler. */
-    bool initialize(std::weak_ptr<BipedalLocomotion::ParametersHandler::IParametersHandler> paramHandler)
+    class PositionTildeEvaluator
     {
-        // ---- fetch parameters -------------------------------------------------
-        auto paramHandlerPtr = paramHandler.lock();
-        if (!paramHandlerPtr)
-        {
-            std::cerr << "AdmittanceController: Parameter handler is not initialized." << std::endl;
-            return false;
-        }
-        if (!paramHandlerPtr->getParameter("kp_gains", kpGains_))
-        {
-            std::cerr << "AdmittanceController: Missing parameter 'kp_gains'." << std::endl;
-            return false;
-        }
+    public:
+        /**
+         * @brief Default constructor
+         */
+        PositionTildeEvaluator() = default;
 
-            if (!paramHandlerPtr->getParameter("ki_gains", kIGains_))
-            {
-                std::cerr << "AdmittanceController: Missing parameter 'ki_gains'." << std::endl;
-                return false;
-            }
+        /**
+         * @brief Initialize the position tilde evaluator
+         */
+        bool initialize(std::weak_ptr<BipedalLocomotion::ParametersHandler::IParametersHandler> paramHandler);
 
-        if (!paramHandlerPtr->getParameter("kp_gains_sim", kpGainsSim_))
-        {
-            std::cerr << "AdmittanceController: Missing parameter 'kp_gains_sim'." << std::endl;
-            return false;
-        }
-        if (!paramHandlerPtr->getParameter("gear_ratio", gearRatio_))
-        {
-            std::cerr << "AdmittanceController: Missing parameter 'gear_ratio'." << std::endl;
-            return false;
-        }
-        if (!paramHandlerPtr->getParameter("ktau", kTau_))
-        {
-            std::cerr << "AdmittanceController: Missing parameter 'ktau'." << std::endl;
-            return false;
-        }
-        if (!paramHandlerPtr->getParameter("max_torque", jointTqLimits_))
-        {
-            std::cerr << "AdmittanceController: Missing parameter 'max_torque'." << std::endl;
-            return false;
-        }
+        /**
+         * @brief Set the input
+         * @param jointPosition The joint position
+         * @param JointDesiredPosition The desired joint position
+         * @return bool True if the input is set successfully, false otherwise
+         */
+        bool setInput(const Eigen::VectorXd& jointPosition, const Eigen::VectorXd& jointDesiredPosition);
 
-            if (!paramHandlerPtr->getParameter("dT", dT))
-            {
-                std::cerr << "AdmittanceController: Missing parameter 'dT'." << std::endl;
-                return false;
-            }
+        /**
+         * @brief Evaluate the position tilde, as described in
+         *  https://github.com/ami-iit/element_sim-2-real-actuatornet/issues/55#issuecomment-2921947297
+         * @param jointPosition The joint position
+         * @param JointDesiredPosition The desired joint position
+         * @return The evaluated position tilde
+         */
+        Eigen::VectorXd getDesiredPositionTilde() const;
 
-        if (kpGains_.size() != kpGainsSim_.size() ||
-            kpGains_.size() != gearRatio_.size() ||
-            kpGains_.size() != kTau_.size() ||
-            kpGains_.size() != jointTqLimits_.size())
-        {
-            std::cerr << "AdmittanceController: Parameter vectors must have the same size." << std::endl;
-            return false;
-        }
- 
-            if ((kpGainsSim_.array() == 0.0).any())
-        {
-            std::cerr << "AdmittanceController: kp_gains_sim cannot contain zero values." << std::endl;
-            return false;
-        }
- 
-        // ---- pre-allocate state vectors ---------------------------------------
-        size_t sz = kpGains_.size();
-        jointsDesiredPos_.setZero(sz);
-        jointsPos_.setZero(sz);
-        jointsTq_.setZero(sz);
-        motorCurrent_.setZero(sz);
-            errorIntegral_.setZero(sz);
- 
-        isInitialized_ = true;
-        return true;
-    }
- 
-    /** Provide current & desired joint positions (same length as gains). */
-    bool setInput(const Eigen::Ref<const Eigen::VectorXd> jointsPosition,
-                  const Eigen::Ref<const Eigen::VectorXd> jointsDesiredPosition)
-    {
-            if (!checkInitialized())
-        {
-            std::cerr << "AdmittanceController: Not initialized." << std::endl;
-            return false;
-        }
- 
-        if (jointsPosition.size() != jointsDesiredPosition.size())
-        {
-            std::cerr << "AdmittanceController: Input arrays must have the same size." << std::endl;
-            return false;
-        }
-        if (jointsPosition.size() != kpGains_.size())
-        {
-            std::cerr << "AdmittanceController: Input arrays size must match gains size." << std::endl;
-            return false;
-        }
-        
-            jointsPos_ = jointsPosition;
-        jointsDesiredPos_ = jointsDesiredPosition;
-        return true;
-    }
- 
-    /** Compute the “desired position tilde” (see original comment). */
-    Eigen::VectorXd getDesiredPositionTilde() const
-    {
-            const Eigen::ArrayXd gamma = kpGains_.array() / kpGainsSim_.array();
-            return (gamma * (jointsDesiredPos_.array() - jointsPos_.array()) + jointsPos_.array()).matrix()
-             + (gamma * (kIGains_.array() / kpGains_.array()) * errorIntegral_.array()).matrix();
-    }
- 
-    /** Run one control cycle: torque & motor-current update. */
-    bool advance()
-    {
-            if (!checkInitialized())
-        {
-            std::cerr << "AdmittanceController: Not initialized." << std::endl;
-            return false;
-        } 
+        /**
+         * @brief Default destructor
+         */
+        ~PositionTildeEvaluator() = default;
 
-            errorIntegral_ += (jointsDesiredPos_ - jointsPos_) * std::chrono::duration<double>(dT).count();
-            jointsTq_ = (kpGainsSim_.array() * (getDesiredPositionTilde().array() - jointsPos_.array())).matrix();
- 
-        // torque saturation
-            jointsTq_ = jointsTq_.cwiseMin(jointTqLimits_.cwiseAbs())
-                            .cwiseMax(-jointTqLimits_.cwiseAbs());
- 
-            motorCurrent_ = jointsTq_.array() / (gearRatio_.array() * kTau_.array());
-        return true;
-    }
- 
-        Eigen::VectorXd getMotorCurrent() const
-        {
-            checkInitialized();
-            return motorCurrent_;
-        }
-        Eigen::VectorXd getJointTorque() const
-        {
-            checkInitialized();
-            return jointsTq_;
-        }
- 
-private:
-    bool checkInitialized() const
-    {
-        if (!isInitialized_)
-        {
-            return false;
-        }
-        return true;
-    }
- 
-    // ---- parameters & limits --------------------------------------------------
-        Eigen::VectorXd kpGains_, kpGainsSim_, kIGains_;
-    Eigen::VectorXd gearRatio_, kTau_;
-    Eigen::VectorXd jointTqLimits_;
-        Eigen::VectorXd errorIntegral_; /**< Error integral for the admittance controller. */
-
-        std::chrono::nanoseconds dT; /**< Time step for the controller. */
- 
-    // ---- runtime state --------------------------------------------------------
-    Eigen::VectorXd jointsDesiredPos_, jointsPos_;
-        Eigen::VectorXd jointsTq_, motorCurrent_;
- 
-    bool isInitialized_{false};
-};
- 
+    private:
+        Eigen::VectorXd m_jointPosition; /**< Joint position */
+        Eigen::VectorXd m_jointDesiredPosition; /**< Desired joint position */
+        Eigen::VectorXd m_KpGainsRigid; /**< Proportional gains for the stiff robot */
+        Eigen::VectorXd m_KpGainsSim; /**< Proportional gains for the compliant robot */
+        bool m_isInitialized{false}; /**< True if the object is initialized. */
+    };
 /**
  * RFModule of the Walking controller
  */
@@ -341,7 +199,8 @@ private:
 
         BipedalLocomotion::YarpUtilities::VectorsCollectionServer m_vectorsCollectionServer; /**< Logger server. */
 
-        AdmittanceController m_admittanceController; /**< Admittance controller. */
+        BipedalLocomotion::JointLevelControllers::PositionToCurrentController m_positionToCurrentController; /**< Position to current controller. */
+        PositionTildeEvaluator m_positionTildeEvaluator; /**< Position tilde evaluator. */
 
         /**
          * Get the robot model from the resource finder and set it.

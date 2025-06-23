@@ -36,6 +36,80 @@
 
 using namespace WalkingControllers;
 
+bool PositionTildeEvaluator::initialize(std::weak_ptr<BipedalLocomotion::ParametersHandler::IParametersHandler> paramHandler)
+{
+    // ---- fetch parameters -------------------------------------------------
+    auto paramHandlerPtr = paramHandler.lock();
+    if (!paramHandlerPtr)
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Parameter handler is not initialized.";
+        return false;
+    }
+    if (!paramHandlerPtr->getParameter("kp_rigid", m_KpGainsRigid))
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter 'kp_rigid'.";
+        return false;
+    }
+
+    if (!paramHandlerPtr->getParameter("kp", m_KpGainsSim))
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter 'kp'.";
+        return false;
+    }
+    if (m_KpGainsRigid.size() != m_KpGainsSim.size())
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Parameter vectors must have the same size.";
+        return false;
+    }
+
+    if ((m_KpGainsSim.array() == 0.0).any())
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] 'kp' cannot contain zero values.";
+        return false;
+    }
+
+
+    // reshape vectors
+    m_jointPosition.setZero(m_KpGainsRigid.size());
+    m_jointDesiredPosition.setZero(m_KpGainsRigid.size());
+
+    m_isInitialized = true;
+    return true;
+}
+
+bool PositionTildeEvaluator::setInput(const Eigen::VectorXd &jointPosition, const Eigen::VectorXd &jointDesiredPosition)
+{
+    if (!m_isInitialized)
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::setInput] The object is not initialized.";
+        return false;
+    }
+
+    if (jointPosition.size() != m_jointPosition.size() || jointDesiredPosition.size() != m_jointDesiredPosition.size())
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::setInput] Input vectors must have the same size as the initialized vectors.";
+        return false;
+    }
+
+    m_jointPosition = jointPosition;
+    m_jointDesiredPosition = jointDesiredPosition;
+
+    return true;
+}
+
+Eigen::VectorXd PositionTildeEvaluator::getDesiredPositionTilde() const
+{
+    if (!m_isInitialized)
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::getDesiredPositionTilde] The object is not initialized.";
+        return Eigen::VectorXd();
+    }
+
+    const Eigen::ArrayXd gamma = m_KpGainsRigid.array() / m_KpGainsSim.array();
+
+    return (gamma * (m_jointDesiredPosition.array() - m_jointPosition.array()) + m_jointPosition.array()).matrix();
+}
+
 void WalkingModule::propagateTime()
 {
     // propagate time
@@ -199,10 +273,16 @@ bool WalkingModule::configure(yarp::os::ResourceFinder &rf)
         return false;
     }
 
-    yarp::os::Bottle &admittanceControlOptions = rf.findGroup("ADMITTANCE_CONTROL");
-    if (!m_admittanceController.initialize(std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>(admittanceControlOptions)))
+    yarp::os::Bottle &positionToCurrentControlOptions = rf.findGroup("POSITION_TO_CURRENT_CONTROL");
+    if (!m_positionToCurrentController.initialize(std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>(positionToCurrentControlOptions)))
     {
-        yError() << "[WalkingModule::configure] Unable to configure the global CoP Evaluator.";
+        yError() << "[WalkingModule::configure] Unable to configure the Position to Current Controller.";
+        return false;
+    }
+
+    if (!m_positionTildeEvaluator.initialize(std::make_shared<BipedalLocomotion::ParametersHandler::YarpImplementation>(positionToCurrentControlOptions)))
+    {
+        yError() << "[WalkingModule::configure] Unable to configure the Position Tilde Evaluator.";
         return false;
     }
 
@@ -1028,26 +1108,42 @@ bool WalkingModule::updateModule()
             }
         }
 
+        // get desird position tilde
         iDynTree::VectorDynSize desiredPositionTilde;
         desiredPositionTilde.resize(m_robotControlHelper->getActuatedDoFs());
-        iDynTree::toEigen(desiredPositionTilde) = m_admittanceController.getDesiredPositionTilde();
-
-        if(!m_admittanceController.setInput(iDynTree::toEigen(m_robotControlHelper->getJointPosition()),
-                                        iDynTree::toEigen(m_qDesired)))
-                                        {
-            yError() << "[WalkingModule::updateModule] Unable to set the input to the admittance controller.";
-            return false;
-                                        }
-
-        if(!m_admittanceController.advance())
+        if (!m_positionTildeEvaluator.setInput(
+            iDynTree::toEigen(m_robotControlHelper->getJointPosition()),
+            iDynTree::toEigen(m_qDesired))
+        )
         {
-            yError() << "[WalkingModule::updateModule] Unable to advance the admittance controller.";
+            yError() << "[WalkingModule::updateModule] Unable to set the input to the position tilde evaluator.";
             return false;
         }
 
+        iDynTree::toEigen(desiredPositionTilde) = m_positionTildeEvaluator.getDesiredPositionTilde();
+
+        // set input to the position to current controller
+        BipedalLocomotion::JointLevelControllers::PositionToCurrentControllerInput positionToCurrentControllerInput;
+        positionToCurrentControllerInput.referencePosition = iDynTree::toEigen(desiredPositionTilde);
+        positionToCurrentControllerInput.feedbackVelocity = iDynTree::toEigen(m_robotControlHelper->getJointVelocity());
+        positionToCurrentControllerInput.feedbackPosition = iDynTree::toEigen(m_robotControlHelper->getJointPosition());
+
+        if(!m_positionToCurrentController.setInput(positionToCurrentControllerInput))
+        {
+            yError() << "[WalkingModule::updateModule] Unable to set the input to the position to current controller.";
+            return false;
+        }
+        // advance the position to current controller
+        if(!m_positionToCurrentController.advance())
+        {
+            yError() << "[WalkingModule::updateModule] Unable to advance the position to current controller.";
+            return false;
+        }
+
+        // get the desired current
         iDynTree::VectorDynSize desiredCurrent;
         desiredCurrent.resize(m_robotControlHelper->getActuatedDoFs());
-        iDynTree::toEigen(desiredCurrent) = m_admittanceController.getMotorCurrent();
+        iDynTree::toEigen(desiredCurrent) = m_positionToCurrentController.getOutput();
 
         if (!m_robotControlHelper->setCurrentReferences(desiredCurrent))
         {
