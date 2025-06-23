@@ -38,24 +38,64 @@ using namespace WalkingControllers;
 
 bool PositionTildeEvaluator::initialize(std::weak_ptr<BipedalLocomotion::ParametersHandler::IParametersHandler> paramHandler)
 {
-    // ---- fetch parameters -------------------------------------------------
+    // read parameters from the parameter handler
     auto paramHandlerPtr = paramHandler.lock();
     if (!paramHandlerPtr)
     {
         yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Parameter handler is not initialized.";
         return false;
     }
-    if (!paramHandlerPtr->getParameter("kp_rigid", m_KpGainsRigid))
+
+    // read joint list
+    std::vector<std::string> jointsList;
+    if (!paramHandlerPtr->getParameter("joints_list", jointsList))
     {
-        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter 'kp_rigid'.";
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter 'joints_list'.";
         return false;
     }
 
-    if (!paramHandlerPtr->getParameter("kp", m_KpGainsSim))
+    // get and parse "kp_rigid" group
+    auto kpRigidGroup = paramHandlerPtr->getGroup("kp_rigid").lock();
+
+    if (!kpRigidGroup)
     {
-        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter 'kp'.";
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Unable to find the 'kp_rigid' group.";
         return false;
     }
+
+    // cycle through the joints list and get the kp gains, and populate the m_KpGainsRigid vector
+    m_KpGainsRigid.resize(jointsList.size());
+    for (size_t i = 0; i < jointsList.size(); ++i)
+    {
+        if (!kpRigidGroup->getParameter(jointsList[i], m_KpGainsRigid[i]))
+        {
+            yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter '"
+                     << jointsList[i] << "' in 'kp_rigid' group.";
+            return false;
+        }
+    }
+
+    // get and parse "kp" group
+    auto kpGroup = paramHandlerPtr->getGroup("kp").lock();
+    if (!kpGroup)
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Unable to find the 'kp' group.";
+        return false;
+    }
+
+    // cycle through the joints list and get the kp gains, and populate the m_KpGainsSim vector
+    m_KpGainsSim.resize(jointsList.size());
+    for (size_t i = 0; i < jointsList.size(); ++i)
+    {
+        if (!kpGroup->getParameter(jointsList[i], m_KpGainsSim[i]))
+        {
+            yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter '"
+                     << jointsList[i] << "' in 'kp' group.";
+            return false;
+        }
+    }
+
+    // check if the kp gains are valid
     if (m_KpGainsRigid.size() != m_KpGainsSim.size())
     {
         yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Parameter vectors must have the same size.";
@@ -67,7 +107,6 @@ bool PositionTildeEvaluator::initialize(std::weak_ptr<BipedalLocomotion::Paramet
         yError() << "[WalkingModule::PositionTildeEvaluator::initialize] 'kp' cannot contain zero values.";
         return false;
     }
-
 
     // reshape vectors
     m_jointPosition.setZero(m_KpGainsRigid.size());
