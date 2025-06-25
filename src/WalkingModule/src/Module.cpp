@@ -75,6 +75,26 @@ bool PositionTildeEvaluator::initialize(std::weak_ptr<BipedalLocomotion::Paramet
         }
     }
 
+    // get and parse "ki_rigid" group
+    auto kiRigidGroup = paramHandlerPtr->getGroup("ki_rigid").lock();
+    if (!kiRigidGroup)
+    {
+        yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Unable to find the 'ki_rigid' group.";
+        return false;
+    }
+
+    // cycle through the joints list and get the ki gains, and populate the m_KiGainsRigid vector
+    m_KiGainsRigid.resize(jointsList.size());
+    for (size_t i = 0; i < jointsList.size(); ++i)
+    {
+        if (!kiRigidGroup->getParameter(jointsList[i], m_KiGainsRigid[i]))
+        {
+            yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Missing parameter '"
+                     << jointsList[i] << "' in 'ki_rigid' group.";
+            return false;
+        }
+    }
+
     // get and parse "kp" group
     auto kpGroup = paramHandlerPtr->getGroup("kp").lock();
     if (!kpGroup)
@@ -96,7 +116,7 @@ bool PositionTildeEvaluator::initialize(std::weak_ptr<BipedalLocomotion::Paramet
     }
 
     // check if the kp gains are valid
-    if (m_KpGainsRigid.size() != m_KpGainsSim.size())
+    if (m_KpGainsRigid.size() != m_KpGainsSim.size() || m_KiGainsRigid.size() != m_KpGainsSim.size())
     {
         yError() << "[WalkingModule::PositionTildeEvaluator::initialize] Parameter vectors must have the same size.";
         return false;
@@ -111,6 +131,7 @@ bool PositionTildeEvaluator::initialize(std::weak_ptr<BipedalLocomotion::Paramet
     // reshape vectors
     m_jointPosition.setZero(m_KpGainsRigid.size());
     m_jointDesiredPosition.setZero(m_KpGainsRigid.size());
+    m_integralTerm.setZero(m_KpGainsRigid.size());
 
     m_isInitialized = true;
     return true;
@@ -136,7 +157,7 @@ bool PositionTildeEvaluator::setInput(const Eigen::VectorXd &jointPosition, cons
     return true;
 }
 
-Eigen::VectorXd PositionTildeEvaluator::getDesiredPositionTilde() const
+Eigen::VectorXd PositionTildeEvaluator::getDesiredPositionTilde()
 {
     if (!m_isInitialized)
     {
@@ -144,9 +165,15 @@ Eigen::VectorXd PositionTildeEvaluator::getDesiredPositionTilde() const
         return Eigen::VectorXd();
     }
 
-    const Eigen::ArrayXd gamma = m_KpGainsRigid.array() / m_KpGainsSim.array();
+    // get multiplicative factors
+    const Eigen::ArrayXd gammaKp = m_KpGainsRigid.array() / m_KpGainsSim.array();
+    const Eigen::ArrayXd gammaKi = m_KiGainsRigid.array() / m_KpGainsSim.array();
 
-    return (gamma * (m_jointDesiredPosition.array() - m_jointPosition.array()) + m_jointPosition.array()).matrix();
+    // update the integral term
+    m_integralTerm += ((m_jointDesiredPosition.array() - m_jointPosition.array()) * m_dT).matrix();
+
+    // compute position tilde
+    return (gammaKp * (m_jointDesiredPosition.array() - m_jointPosition.array()) + gammaKi * m_integralTerm.array() + m_jointPosition.array()).matrix();
 }
 
 void WalkingModule::propagateTime()
@@ -324,6 +351,7 @@ bool WalkingModule::configure(yarp::os::ResourceFinder &rf)
         yError() << "[WalkingModule::configure] Unable to configure the Position Tilde Evaluator.";
         return false;
     }
+    m_positionTildeEvaluator.setTimeStep(m_dT);
 
     if (!setRobotModel(rf))
     {

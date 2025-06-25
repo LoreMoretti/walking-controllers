@@ -87,7 +87,13 @@ namespace WalkingControllers
          * @param JointDesiredPosition The desired joint position
          * @return The evaluated position tilde
          */
-        Eigen::VectorXd getDesiredPositionTilde() const;
+        Eigen::VectorXd getDesiredPositionTilde();
+
+        /**
+         * @brief Set the time step
+         * @param dT The time step
+         */
+        void setTimeStep(double dT) { m_dT = dT; }
 
         /**
          * @brief Default destructor
@@ -98,8 +104,11 @@ namespace WalkingControllers
         Eigen::VectorXd m_jointPosition; /**< Joint position */
         Eigen::VectorXd m_jointDesiredPosition; /**< Desired joint position */
         Eigen::VectorXd m_KpGainsRigid; /**< Proportional gains for the stiff robot */
+        Eigen::VectorXd m_KiGainsRigid; /**< Integral gains for the stiff robot */
         Eigen::VectorXd m_KpGainsSim; /**< Proportional gains for the compliant robot */
         bool m_isInitialized{false}; /**< True if the object is initialized. */
+        Eigen::VectorXd m_integralTerm; /**< Integral term for the position tilde */
+        double m_dT = 0.01; /**< Time step */
     };
 /**
  * RFModule of the Walking controller
