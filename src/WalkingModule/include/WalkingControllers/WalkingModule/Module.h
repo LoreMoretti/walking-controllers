@@ -14,6 +14,7 @@
 // YARP
 #include <yarp/os/RFModule.h>
 #include <yarp/sig/Vector.h>
+#include <yarp/os/Bottle.h>
 
 #include <yarp/os/RpcClient.h>
 
@@ -131,6 +132,7 @@ namespace WalkingControllers
 
         yarp::os::Port m_rpcPort; /**< Remote Procedure Call port. */
         yarp::os::BufferedPort<yarp::sig::Vector> m_desiredUnyciclePositionPort; /**< Desired robot position port. */
+        yarp::os::BufferedPort<yarp::os::Bottle> m_rootLinkGroundTruthPort; /**< Port to read the root link ground truth (if available). */
 
         bool m_newTrajectoryRequired; /**< if true a new trajectory will be merged soon. (after m_newTrajectoryMergeCounter - 2 cycles). */
         size_t m_newTrajectoryMergeCounter; /**< The new trajectory will be merged after m_newTrajectoryMergeCounter - 2 cycles. */

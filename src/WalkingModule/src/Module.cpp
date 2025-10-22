@@ -8,6 +8,7 @@
 
 // YARP
 #include <yarp/eigen/Eigen.h>
+#include <yarp/os/Bottle.h>
 #include <yarp/os/Network.h>
 #include <yarp/os/RFModule.h>
 #include <yarp/os/BufferedPort.h>
@@ -220,6 +221,16 @@ bool WalkingModule::configure(yarp::os::ResourceFinder &rf)
         yError() << "[WalkingModule::configure] Could not open" << desiredUnyciclePositionPortName << " port.";
         return false;
     }
+
+    // open port to read from waist imu ground truth (if available)
+    std::string rootLinkGroundTruthPortName = "/" + getName() + "/basestate/measures:i";
+    if (!m_rootLinkGroundTruthPort.open(rootLinkGroundTruthPortName))
+    {
+        yError() << "[WalkingModule::configure] Could not open" << rootLinkGroundTruthPortName << " port.";
+        return false;
+    }
+    // connect to server port
+    yarp::os::Network::connect("/basestate/measures:o", rootLinkGroundTruthPortName);
 
     // initialize the trajectory planner
     m_trajectoryGenerator = std::make_unique<TrajectoryGenerator>();
@@ -443,6 +454,12 @@ bool WalkingModule::configure(yarp::os::ResourceFinder &rf)
         m_vectorsCollectionServer.populateMetadata("root_link::linear_velocity::measured", {"x", "y", "z"});
         m_vectorsCollectionServer.populateMetadata("root_link::angular_velocity::measured", {"x", "y", "z"});
 
+        // root_link link information (ground truth from motion capture if available)
+        m_vectorsCollectionServer.populateMetadata("root_link::position::ground_truth", {"x", "y", "z"});
+        m_vectorsCollectionServer.populateMetadata("root_link::orientation::ground_truth", {"roll", "pitch", "yaw"});
+        m_vectorsCollectionServer.populateMetadata("root_link::linear_velocity::ground_truth", {"x", "y", "z"});
+        m_vectorsCollectionServer.populateMetadata("root_link::angular_velocity::ground_truth", {"x", "y", "z"});
+
         // collect the stance foot information
         m_vectorsCollectionServer.populateMetadata("stance_foot::is_left", {"scalar"});
 
@@ -503,6 +520,11 @@ bool WalkingModule::close()
     // close the ports
     m_rpcPort.close();
     m_desiredUnyciclePositionPort.close();
+    if (yarp::os::Network::isConnected("/basestate/measures:o", m_rootLinkGroundTruthPort.getName()))
+    {
+        yarp::os::Network::disconnect("/basestate/measures:o", m_rootLinkGroundTruthPort.getName());
+    }
+    m_rootLinkGroundTruthPort.close();
 
     // close the connection with robot
     if (!m_robotControlHelper->close())
@@ -1132,6 +1154,67 @@ bool WalkingModule::updateModule()
             m_vectorsCollectionServer.populateData("root_link::orientation::measured", m_FKSolver->getRootLinkToWorldTransform().getRotation().asRPY());
             m_vectorsCollectionServer.populateData("root_link::linear_velocity::measured", m_FKSolver->getRootLinkVelocity().getLinearVec3());
             m_vectorsCollectionServer.populateData("root_link::angular_velocity::measured", m_FKSolver->getRootLinkVelocity().getAngularVec3());
+
+            // root_link ground truth (if available)
+            yarp::os::Bottle *rootLinkGroundTruthData = nullptr;
+            rootLinkGroundTruthData = m_rootLinkGroundTruthPort.read(false);
+            if (rootLinkGroundTruthData != nullptr)
+            {
+
+                // anonymous function to access nested bottles of the form ((x y z) t) and extract the vector3
+                auto extractVec3 = [](const yarp::os::Bottle* b) -> iDynTree::Vector3 {
+
+                    iDynTree::Vector3 vec;
+                    if (!b || b->size() == 0)
+                        return vec;
+
+                    // Get outer ((x y z) t)
+                    const yarp::os::Bottle* outer = b->get(0).asList();
+                    if (!outer || outer->size() == 0)
+                        return vec;
+
+                    // Get inner (x y z)
+                    const yarp::os::Bottle* inner = outer->get(0).asList();
+                    if (!inner || inner->size() < 3)
+                        return vec;
+
+                    for (size_t i = 0; i < 3; ++i)
+                        vec(i) = inner->get(i).asFloat64();
+
+                    return vec;
+                };
+
+                auto posBottle = rootLinkGroundTruthData->get(9).asList();
+                auto linVelBottle = rootLinkGroundTruthData->get(10).asList();
+                auto oriBottle = rootLinkGroundTruthData->get(3).asList();
+                auto angVelBottle = rootLinkGroundTruthData->get(0).asList();
+
+                if (angVelBottle == nullptr)
+                {
+                    yWarning() << "[WalkingModule::updateModule] root_link ground truth data malformed.";
+                    return false;
+                }
+
+                iDynTree::Vector3 position = extractVec3(posBottle);
+                iDynTree::Vector3 orientation = extractVec3(oriBottle);
+                // from deg to rad
+                for (size_t i = 0; i < 3; ++i)
+                {
+                    orientation(i) = orientation(i) * M_PI / 180.0;
+                }
+                iDynTree::Vector3 linearVelocity = extractVec3(linVelBottle);
+                iDynTree::Vector3 angularVelocity = extractVec3(angVelBottle);
+                // from deg/s to rad/s
+                for (size_t i = 0; i < 3; ++i)
+                {
+                    angularVelocity(i) = angularVelocity(i) * M_PI / 180.0;
+                }
+
+                m_vectorsCollectionServer.populateData("root_link::position::ground_truth", position);
+                m_vectorsCollectionServer.populateData("root_link::orientation::ground_truth", orientation);
+                m_vectorsCollectionServer.populateData("root_link::linear_velocity::ground_truth", linearVelocity);
+                m_vectorsCollectionServer.populateData("root_link::angular_velocity::ground_truth", angularVelocity);
+            }
 
             // collect the stance foot information
             const double isLeftFootFixed = m_isLeftFixedFrame.front() ? 1.0 : 0.0;
